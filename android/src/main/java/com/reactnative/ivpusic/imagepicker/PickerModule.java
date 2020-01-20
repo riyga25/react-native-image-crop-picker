@@ -35,6 +35,11 @@ import com.facebook.react.modules.core.PermissionListener;
 import com.yalantis.ucrop.UCrop;
 import com.yalantis.ucrop.UCropActivity;
 
+import com.nostra13.universalimageloader.cache.disc.naming.Md5FileNameGenerator;
+import com.nostra13.universalimageloader.core.ImageLoader;
+import com.nostra13.universalimageloader.core.ImageLoaderConfiguration;
+import com.nostra13.universalimageloader.core.assist.QueueProcessingType;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -48,7 +53,20 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 
+import cn.finalteam.rxgalleryfinal.RxGalleryFinal;
+import cn.finalteam.rxgalleryfinal.RxGalleryFinalApi;
+import cn.finalteam.rxgalleryfinal.bean.ImageCropBean;
+import cn.finalteam.rxgalleryfinal.bean.MediaBean;
+import cn.finalteam.rxgalleryfinal.imageloader.ImageLoaderType;
+import cn.finalteam.rxgalleryfinal.rxbus.RxBusResultDisposable;
+import cn.finalteam.rxgalleryfinal.rxbus.event.ImageMultipleResultEvent;
+import cn.finalteam.rxgalleryfinal.rxbus.event.ImageRadioResultEvent;
+import cn.finalteam.rxgalleryfinal.ui.RxGalleryListener;
+import cn.finalteam.rxgalleryfinal.ui.base.IRadioImageCheckedListener;
+
 class PickerModule extends ReactContextBaseJavaModule implements ActivityEventListener {
+
+    private Promise mPickerPromise;
 
     private static final int IMAGE_PICKER_REQUEST = 61110;
     private static final int CAMERA_PICKER_REQUEST = 61111;
@@ -65,6 +83,17 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     private static final String E_CANNOT_LAUNCH_CAMERA = "E_CANNOT_LAUNCH_CAMERA";
     private static final String E_PERMISSIONS_MISSING = "E_PERMISSION_MISSING";
     private static final String E_ERROR_WHILE_CLEANING_FILES = "E_ERROR_WHILE_CLEANING_FILES";
+
+    private boolean isCamera = false;
+    private boolean openCameraOnStart = false;
+    private boolean isVideo = false;
+    private boolean isHidePreview = false;
+    private boolean isPlayGif = false;
+    private boolean isHideVideoPreview = false;
+    private boolean isSelectBoth = false;
+    private int videoQuality = 1;
+    private String title = null;
+    private String imageLoader = null;
 
     private String mediaType = "any";
     private boolean multiple = false;
@@ -92,6 +121,14 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     private final String DEFAULT_WIDGET_COLOR = "#03A9F4";
     private int width = 0;
     private int height = 0;
+
+    private int maxSize = 5;
+    private int compressQuality = -1;
+    private boolean returnAfterShot = false;
+    private boolean multipleShot  = false;
+    private int spanCount = 3;
+    private float aspectRatioX = 1;
+    private float aspectRatioY = 1;
 
     private Uri mCameraCaptureURI;
     private String mCurrentMediaPath;
@@ -137,6 +174,27 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         enableRotationGesture = options.hasKey("enableRotationGesture") && options.getBoolean("enableRotationGesture");
         disableCropperColorSetters = options.hasKey("disableCropperColorSetters") && options.getBoolean("disableCropperColorSetters");
         useFrontCamera = options.hasKey("useFrontCamera") && options.getBoolean("useFrontCamera");
+
+        isCamera = options.hasKey("isCamera") && options.getBoolean("isCamera");
+        openCameraOnStart = options.hasKey("openCameraOnStart") && options.getBoolean("openCameraOnStart");
+        maxSize = options.hasKey("maxSize") ? options.getInt("maxSize") : maxSize;
+        compressQuality = options.hasKey("compressQuality") ? options.getInt("compressQuality") : compressQuality;
+        title = options.hasKey("title") ? options.getString("title") : title;
+        returnAfterShot = options.hasKey("returnAfterShot") && options.getBoolean("returnAfterShot");
+        multipleShot = options.hasKey("multipleShot") && options.getBoolean("multipleShot");
+        isVideo = options.hasKey("isVideo") && options.getBoolean("isVideo");
+        isSelectBoth = options.hasKey("isSelectBoth") && options.getBoolean("isSelectBoth");
+        videoQuality = options.hasKey("videoQuality") ? options.getInt("videoQuality"):1;
+        isHidePreview = options.hasKey("isHidePreview") && options.getBoolean("isHidePreview");
+        isHideVideoPreview = options.hasKey("isHideVideoPreview") && options.getBoolean("isHideVideoPreview");
+        isPlayGif = options.hasKey("isPlayGif") && options.getBoolean("isPlayGif");
+        spanCount = options.hasKey("spanCount") ? options.getInt("spanCount") : spanCount;
+
+        aspectRatioX = options.hasKey("aspectRatioX") ? options.getInt("aspectRatioX") : aspectRatioX;
+        aspectRatioY = options.hasKey("aspectRatioY") ? options.getInt("aspectRatioY") : aspectRatioY;
+
+        imageLoader = options.hasKey("imageLoader") ? options.getString("imageLoader") : imageLoader;
+
         this.options = options;
     }
 
@@ -404,6 +462,151 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
                 return null;
             }
         });
+    }
+
+    private void initImageLoader(Activity activity) {
+
+        ImageLoaderConfiguration.Builder config = new ImageLoaderConfiguration.Builder(activity);
+        config.threadPriority(Thread.NORM_PRIORITY - 2);
+        config.denyCacheImageMultipleSizesInMemory();
+        config.diskCacheFileNameGenerator(new Md5FileNameGenerator());
+        config.diskCacheSize(50 * 1024 * 1024); // 50 MiB
+        config.tasksProcessingOrder(QueueProcessingType.LIFO);
+        ImageLoader.getInstance().init(config.build());
+    }
+
+    @ReactMethod
+    public void openMultiplePicker(final ReadableMap options, final Promise promise) {
+        final Activity activity = getCurrentActivity();
+
+        if (activity == null) {
+            promise.reject(E_ACTIVITY_DOES_NOT_EXIST, "Activity doesn't exist");
+            return;
+        }
+
+        setConfiguration(options);
+        initImageLoader(activity);
+        mPickerPromise = promise;
+
+        RxGalleryFinal rxGalleryFinal =  RxGalleryFinal.with(activity);
+        rxGalleryFinal.spanCount(spanCount);
+        rxGalleryFinal.setVideoQuality(videoQuality);
+        if(openCameraOnStart){
+            rxGalleryFinal.openCameraOnStart();
+        }else if(!isCamera){
+            rxGalleryFinal.hideCamera();
+        }
+        if(compressQuality>0){
+            rxGalleryFinal.cropropCompressionQuality(compressQuality);
+        }
+        if(title != null){
+            rxGalleryFinal.setTitle(title);
+        }
+        if(returnAfterShot){
+            rxGalleryFinal.returnAfterShot();
+        }
+        if(multipleShot){
+            rxGalleryFinal.multipleShot();
+        }
+        if(isVideo){
+            rxGalleryFinal.video();
+        }else {
+            rxGalleryFinal.image();
+        }
+        if(isSelectBoth){
+            rxGalleryFinal.selectBoth();
+        }
+        if(isHidePreview){
+            rxGalleryFinal.hidePreview();
+        }
+        if (isHideVideoPreview){
+            rxGalleryFinal.videoPreview();
+        }
+        if(isPlayGif){
+            rxGalleryFinal.gif();
+        }
+        if (imageLoader != null){
+            switch (imageLoader){
+                case "PICASSO":
+                    rxGalleryFinal.imageLoader(ImageLoaderType.PICASSO);
+                    break;
+                case "GLIDE":
+                    rxGalleryFinal.imageLoader(ImageLoaderType.GLIDE);
+                    break;
+                case "FRESCO":
+                    rxGalleryFinal.imageLoader(ImageLoaderType.FRESCO);
+                    break;
+                case "UNIVERSAL":
+                    rxGalleryFinal.imageLoader(ImageLoaderType.UNIVERSAL);
+                    break;
+                default:
+                    break;
+            }
+        }else{
+            rxGalleryFinal.imageLoader(ImageLoaderType.GLIDE);
+        }
+        if(!this.multiple) {
+            if(cropping){
+                rxGalleryFinal.crop();
+                initCrop(rxGalleryFinal);
+                //裁剪图片的回调
+                RxGalleryListener
+                        .getInstance()
+                        .setRadioImageCheckedListener(
+                                new IRadioImageCheckedListener() {
+                                    @Override
+                                    public void cropAfter(Object t) {
+                                        WritableArray resultArr = new WritableNativeArray();
+                                        try {
+                                            resultArr.pushMap(getAsyncSelection(activity,t.toString()));
+                                        } catch (Exception e) {
+                                            e.printStackTrace();
+                                        }
+                                        mPickerPromise.resolve(resultArr);
+                                    }
+
+                                    @Override
+                                    public boolean isActivityFinish() {
+                                        return true;
+                                    }
+                                });
+            }
+            rxGalleryFinal
+                    .radio()
+                    .subscribe(new RxBusResultDisposable<ImageRadioResultEvent>() {
+                        @Override
+                        protected void onEvent(ImageRadioResultEvent imageRadioResultEvent) throws Exception {
+                            if(!cropping){
+                                ImageCropBean result = imageRadioResultEvent.getResult();
+                                WritableArray resultArr = new WritableNativeArray();
+                                resultArr.pushMap(getAsyncSelection(activity,result));
+                                mPickerPromise.resolve(resultArr);
+                            }
+                        }
+                    })
+                    .openGallery();
+        } else {
+            rxGalleryFinal
+                    .multiple()
+                    .maxSize(maxSize)
+                    .subscribe(new RxBusResultDisposable<ImageMultipleResultEvent>() {
+                        @Override
+                        protected void onEvent(ImageMultipleResultEvent imageMultipleResultEvent) throws Exception {
+                            List<MediaBean> list = imageMultipleResultEvent.getResult();
+                            WritableArray resultArr = new WritableNativeArray();
+                            for(MediaBean bean:list){
+                                resultArr.pushMap(getAsyncSelection(activity,bean));
+                            }
+                            mPickerPromise.resolve(resultArr);
+                        }
+
+                        @Override
+                        public void onComplete() {
+                            super.onComplete();
+                        }
+                    })
+                    .openGallery();
+        }
     }
 
     private String getBase64StringFromFile(String absoluteFilePath) {
